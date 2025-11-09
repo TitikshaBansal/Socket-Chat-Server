@@ -51,17 +51,28 @@ class ClientHandler:
                 # Client disconnected
                 return None
             
-            # Update activity timestamp
+            # Update activity timestamp (both local and server)
             self.last_activity = time.time()
+            if self.username:  # Only update if logged in
+                self.server.update_user_activity(self.client_socket)
             
             # Append to buffer
             self.buffer += chunk
+            
+            # Normalize line endings: convert \r\n to \n
+            self.buffer = self.buffer.replace('\r\n', '\n')
+            # Also handle standalone \r (old Mac style)
+            self.buffer = self.buffer.replace('\r', '\n')
             
             # Process all complete lines in buffer
             lines = []
             while '\n' in self.buffer:
                 line, self.buffer = self.buffer.split('\n', 1)
-                lines.append(line.strip())
+                line = line.strip()
+                
+                # Only add non-empty lines
+                if line:
+                    lines.append(line)
             
             # Return list of complete lines (empty list if no complete lines yet)
             # Empty list indicates we received data but no complete lines
@@ -89,6 +100,11 @@ class ClientHandler:
             # Process all complete lines received
             for line in lines:
                 if not line:
+                    continue
+                
+                # Skip very short lines that are likely telnet control characters or echo
+                # Minimum valid command is "WHO" (3 chars) or "PING" (4 chars)
+                if len(line) < 3:
                     continue
                 
                 # Parse LOGIN command

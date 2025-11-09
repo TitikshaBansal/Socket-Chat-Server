@@ -107,6 +107,12 @@ class ChatServer:
             self.user_last_activity[client_socket] = time.time()
             return True
     
+    def update_user_activity(self, client_socket):
+        """Update the last activity timestamp for a user."""
+        with self.lock:
+            if client_socket in self.user_last_activity:
+                self.user_last_activity[client_socket] = time.time()
+    
     def broadcast(self, message, exclude=None):
         """Broadcast a message to all connected users except the sender."""
         message_bytes = (message + '\n').encode('utf-8')
@@ -127,6 +133,7 @@ class ChatServer:
     
     def send_private_message(self, sender_username, target_username, message_text):
         """Send a private message from one user to another."""
+        # Find sockets while holding lock, then release before sending
         with self.lock:
             # Find target user's socket
             target_socket = None
@@ -135,29 +142,35 @@ class ChatServer:
                     target_socket = socket_obj
                     break
             
-            if target_socket:
+            # Find sender's socket
+            sender_socket = None
+            for socket_obj, username in self.users.items():
+                if username == sender_username:
+                    sender_socket = socket_obj
+                    break
+        
+        if target_socket:
+            try:
+                message = protocol.format_private_message(sender_username, message_text)
+                target_socket.sendall((message + '\n').encode('utf-8'))
+            except (BrokenPipeError, ConnectionError, OSError) as e:
+                # Only disconnect on actual socket errors, not all exceptions
+                print(f"Error sending DM to {target_username}: {e}")
+                # Target disconnected, remove them
+                self.disconnect_user(target_socket, target_username)
+            except Exception as e:
+                # Other exceptions - log but don't disconnect
+                print(f"Unexpected error sending DM to {target_username}: {e}")
+        else:
+            # User not found, notify sender
+            if sender_socket:
                 try:
-                    message = protocol.format_private_message(sender_username, message_text)
-                    target_socket.sendall((message + '\n').encode('utf-8'))
+                    error_msg = protocol.format_error(
+                        protocol.ERR_USER_NOT_FOUND, target_username
+                    )
+                    sender_socket.sendall((error_msg + '\n').encode('utf-8'))
                 except Exception:
-                    # Target disconnected, remove them
-                    self.disconnect_user(target_socket, target_username)
-            else:
-                # User not found, notify sender
-                sender_socket = None
-                for socket_obj, username in self.users.items():
-                    if username == sender_username:
-                        sender_socket = socket_obj
-                        break
-                
-                if sender_socket:
-                    try:
-                        error_msg = protocol.format_error(
-                            protocol.ERR_USER_NOT_FOUND, target_username
-                        )
-                        sender_socket.sendall((error_msg + '\n').encode('utf-8'))
-                    except Exception:
-                        pass
+                    pass
     
     def send_user_list(self, client_socket):
         """Send list of active users to a client."""
