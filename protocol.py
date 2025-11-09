@@ -5,6 +5,7 @@ Protocol definitions and message formatting for the chat server.
 
 # Command prefixes
 CMD_LOGIN = 'LOGIN'
+CMD_LOGOUT = 'LOGOUT'
 CMD_MSG = 'MSG'
 CMD_WHO = 'WHO'
 CMD_DM = 'DM'

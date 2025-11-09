@@ -137,13 +137,28 @@ class ClientHandler:
                     self.send(protocol.format_error(protocol.ERR_NOT_LOGGED_IN))
     
     def handle_commands(self):
-        """Handle commands after login. Processes commands until disconnect."""
+        """Handle commands after login. Processes commands until disconnect or logout.
+        
+        Returns True if logout was requested, False otherwise (disconnect/error).
+        """
+        last_activity_update = time.time()
+        activity_update_interval = 10  # Update activity every 10 seconds to prevent idle timeout
+        
         while True:
             # Read complete lines
             lines = self.read_lines()
             if lines is None:
-                # Timeout is normal, continue loop (idle timeout handled by server)
+                # Timeout is normal - but update activity periodically to show connection is alive
+                current_time = time.time()
+                if current_time - last_activity_update >= activity_update_interval:
+                    # Update activity to show user is still connected (even if idle)
+                    if self.username:
+                        self.server.update_user_activity(self.client_socket)
+                    last_activity_update = current_time
                 continue
+            
+            # Data received - update activity timestamp
+            last_activity_update = time.time()
             
             # Process all complete lines received
             for line in lines:
@@ -151,7 +166,13 @@ class ClientHandler:
                     continue
                 
                 # Parse and handle commands
-                if line.startswith(protocol.CMD_MSG + ' '):
+                if line == protocol.CMD_LOGOUT:
+                    # User requested logout
+                    self.send(protocol.RESP_OK)
+                    print(f"User '{self.username}' logged out from {self.address}")
+                    return True
+                
+                elif line.startswith(protocol.CMD_MSG + ' '):
                     # Broadcast message
                     message_text = protocol.parse_message_command(line)
                     if message_text:

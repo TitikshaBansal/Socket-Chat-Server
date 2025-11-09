@@ -86,13 +86,16 @@ class ChatServer:
                 return
             
             # Main command handling phase
-            handler.handle_commands()
+            logout_requested = handler.handle_commands()
+            # If logout was requested, handle_commands returns True
+            # Otherwise, it runs until disconnect/error
         
         except Exception as e:
             print(f"Error in client handler for {address}: {e}")
         
         finally:
-            # Clean up on disconnect
+            # Clean up on disconnect or logout
+            # disconnect_user will broadcast the disconnect message
             self.disconnect_user(client_socket, handler.username)
     
     def register_user(self, client_socket, username):
@@ -112,6 +115,9 @@ class ChatServer:
         with self.lock:
             if client_socket in self.user_last_activity:
                 self.user_last_activity[client_socket] = time.time()
+                # Debug: log activity update (can be removed in production)
+                username = self.users.get(client_socket, "unknown")
+                # Uncomment for debugging: print(f"Activity updated for {username}")
     
     def broadcast(self, message, exclude=None):
         """Broadcast a message to all connected users except the sender."""
@@ -217,6 +223,8 @@ class ChatServer:
                 for client_socket, last_activity in list(self.user_last_activity.items()):
                     elapsed = current_time - last_activity
                     if elapsed > self.idle_timeout:
+                        username = self.users.get(client_socket, "unknown")
+                        print(f"Idle timeout: {username} inactive for {elapsed:.1f} seconds")
                         idle_clients.append(client_socket)
             
             # Disconnect idle clients
