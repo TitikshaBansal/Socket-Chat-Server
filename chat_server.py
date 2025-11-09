@@ -8,7 +8,16 @@ Uses only Python standard library (socket, threading, os, sys, argparse).
 import os
 import sys
 import argparse
+import logging
 import server
+
+# Configure logging (will be overridden if server.py configures it first)
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    datefmt='%Y-%m-%d %H:%M:%S'
+)
+logger = logging.getLogger(__name__)
 
 
 def main():
@@ -30,7 +39,7 @@ def main():
     
     # Validate port
     if not (1 <= port <= 65535):
-        print(f"Error: Port must be between 1 and 65535")
+        logger.error(f"Invalid port: {port}. Port must be between 1 and 65535")
         sys.exit(1)
     
     # Create and start server

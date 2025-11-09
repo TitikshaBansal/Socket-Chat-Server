@@ -6,32 +6,32 @@ Handles TCP stream buffering, command parsing, and message sending.
 
 import socket
 import time
+import logging
 import protocol
+from client import Client
+
+logger = logging.getLogger(__name__)
 
 
 class ClientHandler:
     """Handles a single client connection with proper TCP stream buffering."""
     
-    def __init__(self, client_socket, address, server):
+    def __init__(self, client: Client, server):
         """Initialize client handler."""
-        self.client_socket = client_socket
-        self.address = address
+        self.client = client
         self.server = server
-        self.username = None
-        self.buffer = ""
-        self.last_activity = time.time()
         
         # Set socket timeout for idle detection
-        self.client_socket.settimeout(1.0)
+        self.client.socket.settimeout(1.0)
     
     def send(self, message):
         """Send a message to the client using sendall() for reliability."""
         try:
             message_bytes = (message + '\n').encode('utf-8')
-            self.client_socket.sendall(message_bytes)
+            self.client.socket.sendall(message_bytes)
             return True
         except Exception as e:
-            print(f"Error sending message to {self.address}: {e}")
+            logger.error(f"Error sending message to {self.client.address}: {e}")
             return False
     
     def read_lines(self):
@@ -45,29 +45,29 @@ class ClientHandler:
         """
         try:
             # Read available data
-            chunk = self.client_socket.recv(1024).decode('utf-8')
+            chunk = self.client.socket.recv(1024).decode('utf-8')
             
             if not chunk:
                 # Client disconnected
                 return None
             
             # Update activity timestamp (both local and server)
-            self.last_activity = time.time()
-            if self.username:  # Only update if logged in
-                self.server.update_user_activity(self.client_socket)
+            self.client.last_activity = time.time()
+            if self.client.username:  # Only update if logged in
+                self.server.update_user_activity(self.client.client_id)
             
             # Append to buffer
-            self.buffer += chunk
+            self.client.buffer += chunk
             
             # Normalize line endings: convert \r\n to \n
-            self.buffer = self.buffer.replace('\r\n', '\n')
+            self.client.buffer = self.client.buffer.replace('\r\n', '\n')
             # Also handle standalone \r (old Mac style)
-            self.buffer = self.buffer.replace('\r', '\n')
+            self.client.buffer = self.client.buffer.replace('\r', '\n')
             
             # Process all complete lines in buffer
             lines = []
-            while '\n' in self.buffer:
-                line, self.buffer = self.buffer.split('\n', 1)
+            while '\n' in self.client.buffer:
+                line, self.client.buffer = self.client.buffer.split('\n', 1)
                 line = line.strip()
                 
                 # Only add non-empty lines
@@ -83,17 +83,17 @@ class ClientHandler:
             # Timeout is normal, no data available yet
             return None
         except Exception as e:
-            print(f"Error reading from {self.address}: {e}")
+            logger.error(f"Error reading from {self.client.address}: {e}")
             return None
     
     def handle_login(self):
         """Handle the login phase. Returns True if login successful, False otherwise."""
-        while True:
+        while self.server.running.is_set():
             # Read complete lines
             lines = self.read_lines()
             if lines is None:
                 # Timeout or error - check for idle timeout
-                if time.time() - self.last_activity > self.server.idle_timeout:
+                if time.time() - self.client.last_activity > self.server.idle_timeout:
                     return False
                 continue
             
@@ -117,24 +117,25 @@ class ClientHandler:
                         continue
                     
                     # Check if username is taken
-                    if not self.server.register_user(self.client_socket, username):
+                    if not self.server.register_user(self.client, username):
                         self.send(protocol.format_error(protocol.ERR_USERNAME_TAKEN))
                         continue
                     
                     # Login successful
-                    self.username = username
                     self.send(protocol.RESP_OK)
-                    print(f"User '{username}' logged in from {self.address}")
+                    logger.info(f"User '{username}' logged in from {self.client.address}")
                     
                     # Broadcast user joined
                     self.server.broadcast(
                         protocol.format_info(f"{username} connected"),
-                        exclude=self.client_socket
+                        exclude_client_id=self.client.client_id
                     )
                     return True
                 else:
                     # Not logged in yet, only accept LOGIN
                     self.send(protocol.format_error(protocol.ERR_NOT_LOGGED_IN))
+        
+        return False
     
     def handle_commands(self):
         """Handle commands after login. Processes commands until disconnect or logout.
@@ -144,7 +145,7 @@ class ClientHandler:
         last_activity_update = time.time()
         activity_update_interval = 10  # Update activity every 10 seconds to prevent idle timeout
         
-        while True:
+        while self.server.running.is_set():
             # Read complete lines
             lines = self.read_lines()
             if lines is None:
@@ -152,8 +153,8 @@ class ClientHandler:
                 current_time = time.time()
                 if current_time - last_activity_update >= activity_update_interval:
                     # Update activity to show user is still connected (even if idle)
-                    if self.username:
-                        self.server.update_user_activity(self.client_socket)
+                    if self.client.username:
+                        self.server.update_user_activity(self.client.client_id)
                     last_activity_update = current_time
                 continue
             
@@ -169,7 +170,7 @@ class ClientHandler:
                 if line == protocol.CMD_LOGOUT:
                     # User requested logout
                     self.send(protocol.RESP_OK)
-                    print(f"User '{self.username}' logged out from {self.address}")
+                    logger.info(f"User '{self.client.username}' logged out from {self.client.address}")
                     return True
                 
                 elif line.startswith(protocol.CMD_MSG + ' '):
@@ -177,13 +178,13 @@ class ClientHandler:
                     message_text = protocol.parse_message_command(line)
                     if message_text:
                         self.server.broadcast(
-                            protocol.format_message(self.username, message_text),
-                            exclude=self.client_socket
+                            protocol.format_message(self.client.username, message_text),
+                            exclude_client_id=self.client.client_id
                         )
                 
                 elif line == protocol.CMD_WHO:
                     # List active users
-                    self.server.send_user_list(self.client_socket)
+                    self.server.send_user_list(self.client)
                 
                 elif line.startswith(protocol.CMD_DM + ' '):
                     # Private message
@@ -191,7 +192,7 @@ class ClientHandler:
                     if result:
                         target_username, message_text = result
                         self.server.send_private_message(
-                            self.username, target_username, message_text
+                            self.client.username, target_username, message_text
                         )
                     else:
                         self.send(protocol.format_error(protocol.ERR_INVALID_DM_FORMAT))
@@ -203,11 +204,12 @@ class ClientHandler:
                 elif line:
                     # Unknown command
                     self.send(protocol.format_error(protocol.ERR_UNKNOWN_COMMAND))
+        
+        return False
     
     def disconnect(self):
         """Clean up and close the client connection."""
         try:
-            self.client_socket.close()
+            self.client.socket.close()
         except Exception:
             pass
-
