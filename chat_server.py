@@ -27,6 +27,7 @@ class ChatServer:
         self.users = {}  # {socket: username}
         self.usernames = set()  # Set of active usernames
         self.user_last_activity = {}  # {socket: timestamp} for idle timeout
+        self.client_buffers = {}  # {socket: buffer_string} for line buffering
         self.lock = threading.Lock()  # Lock for thread-safe operations
         
         # Configuration
@@ -74,6 +75,46 @@ class ChatServer:
             print("\nShutting down server...")
             self.shutdown()
     
+    def _read_line(self, client_socket):
+        """Read a complete line from the socket, buffering partial data."""
+        # Initialize buffer if needed
+        if client_socket not in self.client_buffers:
+            self.client_buffers[client_socket] = ''
+        
+        # Check if we already have a complete line in buffer
+        if '\n' in self.client_buffers[client_socket]:
+            lines = self.client_buffers[client_socket].split('\n', 1)
+            self.client_buffers[client_socket] = lines[1]
+            return lines[0]
+        
+        # Read more data until we get a complete line
+        while True:
+            try:
+                data = client_socket.recv(1024).decode('utf-8')
+                if not data:
+                    return None
+                
+                # Update activity timestamp
+                with self.lock:
+                    if client_socket in self.user_last_activity:
+                        self.user_last_activity[client_socket] = time.time()
+                
+                # Add to buffer
+                self.client_buffers[client_socket] += data
+                
+                # Check if we now have a complete line
+                if '\n' in self.client_buffers[client_socket]:
+                    lines = self.client_buffers[client_socket].split('\n', 1)
+                    self.client_buffers[client_socket] = lines[1]
+                    return lines[0]
+                    
+            except socket.timeout:
+                # Timeout is normal, return None to allow idle checking
+                return None
+            except Exception as e:
+                print(f"Error reading from socket: {e}")
+                return None
+    
     def _handle_client(self, client_socket, address):
         """Handle communication with a single client."""
         username = None
@@ -82,50 +123,17 @@ class ChatServer:
             # Set socket timeout for idle detection
             client_socket.settimeout(1.0)
             
+            # Initialize buffer and activity timestamp for this client
+            self.client_buffers[client_socket] = ''
+            with self.lock:
+                self.user_last_activity[client_socket] = time.time()
+            
             # Login phase
             while True:
-                try:
-                    data = client_socket.recv(1024).decode('utf-8')
-                    if not data:
-                        break
-                    
-                    # Update activity timestamp
-                    with self.lock:
-                        self.user_last_activity[client_socket] = time.time()
-                    
-                    # Parse command
-                    command = data.strip()
-                    
-                    if command.startswith('LOGIN '):
-                        username = command[6:].strip()
-                        
-                        # Validate username
-                        if not username:
-                            client_socket.send(b"ERR invalid-username\n")
-                            continue
-                        
-                        # Check if username is taken
-                        with self.lock:
-                            if username in self.usernames:
-                                client_socket.send(b"ERR username-taken\n")
-                                continue
-                            
-                            # Register user
-                            self.users[client_socket] = username
-                            self.usernames.add(username)
-                            self.user_last_activity[client_socket] = time.time()
-                        
-                        client_socket.send(b"OK\n")
-                        print(f"User '{username}' logged in from {address}")
-                        
-                        # Broadcast user joined (optional enhancement)
-                        self._broadcast(f"INFO {username} connected", exclude=client_socket)
-                        break
-                    else:
-                        # Not logged in yet, only accept LOGIN
-                        client_socket.send(b"ERR not-logged-in\n")
-                        
-                except socket.timeout:
+                # Read a complete line
+                line = self._read_line(client_socket)
+                
+                if line is None:
                     # Check for idle timeout during login
                     with self.lock:
                         if client_socket in self.user_last_activity:
@@ -133,9 +141,42 @@ class ChatServer:
                             if elapsed > self.idle_timeout:
                                 break
                     continue
-                except Exception as e:
-                    print(f"Error during login: {e}")
+                
+                # Empty line, skip
+                if not line.strip():
+                    continue
+                
+                # Parse command
+                command = line.strip()
+                
+                if command.startswith('LOGIN '):
+                    username = command[6:].strip()
+                    
+                    # Validate username
+                    if not username:
+                        client_socket.send(b"ERR invalid-username\n")
+                        continue
+                    
+                    # Check if username is taken
+                    with self.lock:
+                        if username in self.usernames:
+                            client_socket.send(b"ERR username-taken\n")
+                            continue
+                        
+                        # Register user
+                        self.users[client_socket] = username
+                        self.usernames.add(username)
+                        self.user_last_activity[client_socket] = time.time()
+                    
+                    client_socket.send(b"OK\n")
+                    print(f"User '{username}' logged in from {address}")
+                    
+                    # Broadcast user joined (optional enhancement)
+                    self._broadcast(f"INFO {username} connected", exclude=client_socket)
                     break
+                else:
+                    # Not logged in yet, only accept LOGIN
+                    client_socket.send(b"ERR not-logged-in\n")
             
             # If login failed, close connection
             if not username:
@@ -144,52 +185,46 @@ class ChatServer:
             
             # Main message handling loop
             while True:
-                try:
-                    data = client_socket.recv(1024).decode('utf-8')
-                    if not data:
-                        break
-                    
-                    # Update activity timestamp
-                    with self.lock:
-                        if client_socket in self.user_last_activity:
-                            self.user_last_activity[client_socket] = time.time()
-                    
-                    # Parse and handle commands
-                    command = data.strip()
-                    
-                    if command.startswith('MSG '):
-                        # Broadcast message
-                        message_text = command[4:].strip()
-                        if message_text:
-                            self._broadcast(f"MSG {username} {message_text}", exclude=client_socket)
-                    
-                    elif command == 'WHO':
-                        # List active users
-                        self._send_user_list(client_socket)
-                    
-                    elif command.startswith('DM '):
-                        # Private message
-                        parts = command[3:].strip().split(' ', 1)
-                        if len(parts) == 2:
-                            target_username, message_text = parts
-                            self._send_private_message(username, target_username, message_text)
-                        else:
-                            client_socket.send(b"ERR invalid-dm-format\n")
-                    
-                    elif command == 'PING':
-                        # Heartbeat
-                        client_socket.send(b"PONG\n")
-                    
-                    elif command:
-                        # Unknown command
-                        client_socket.send(b"ERR unknown-command\n")
-                    
-                except socket.timeout:
+                # Read a complete line
+                line = self._read_line(client_socket)
+                
+                if line is None:
                     # Timeout is normal, continue loop to check for idle
                     continue
-                except Exception as e:
-                    print(f"Error handling message from {username}: {e}")
-                    break
+                
+                # Empty line, skip
+                if not line.strip():
+                    continue
+                
+                # Parse and handle commands
+                command = line.strip()
+                
+                if command.startswith('MSG '):
+                    # Broadcast message
+                    message_text = command[4:].strip()
+                    if message_text:
+                        self._broadcast(f"MSG {username} {message_text}", exclude=client_socket)
+                
+                elif command == 'WHO':
+                    # List active users
+                    self._send_user_list(client_socket)
+                
+                elif command.startswith('DM '):
+                    # Private message
+                    parts = command[3:].strip().split(' ', 1)
+                    if len(parts) == 2:
+                        target_username, message_text = parts
+                        self._send_private_message(username, target_username, message_text)
+                    else:
+                        client_socket.send(b"ERR invalid-dm-format\n")
+                
+                elif command == 'PING':
+                    # Heartbeat
+                    client_socket.send(b"PONG\n")
+                
+                elif command:
+                    # Unknown command
+                    client_socket.send(b"ERR unknown-command\n")
         
         except Exception as e:
             print(f"Error in client handler for {address}: {e}")
@@ -270,6 +305,8 @@ class ChatServer:
                     self.usernames.remove(username)
                 if client_socket in self.user_last_activity:
                     del self.user_last_activity[client_socket]
+                if client_socket in self.client_buffers:
+                    del self.client_buffers[client_socket]
         
         try:
             client_socket.close()
