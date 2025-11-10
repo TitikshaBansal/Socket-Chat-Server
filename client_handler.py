@@ -169,9 +169,12 @@ class ClientHandler:
                 # Parse and handle commands
                 if line == protocol.CMD_LOGOUT:
                     # User requested logout
-                    self.send(protocol.RESP_OK)
-                    logger.info(f"User '{self.client.username}' logged out from {self.client.address}")
-                    return True
+                    if self.send(protocol.RESP_OK):
+                        logger.info(f"User '{self.client.username}' logged out from {self.client.address}")
+                        return True
+                    else:
+                        logger.warning(f"Failed to send logout confirmation to {self.client.username}")
+                        return False
                 
                 elif line.startswith(protocol.CMD_MSG + ' '):
                     # Broadcast message
@@ -191,10 +194,12 @@ class ClientHandler:
                     result = protocol.parse_dm_command(line)
                     if result:
                         target_username, message_text = result
+                        logger.debug(f"DM from {self.client.username} to {target_username}: {message_text}")
                         self.server.send_private_message(
                             self.client.username, target_username, message_text
                         )
                     else:
+                        logger.warning(f"Invalid DM format from {self.client.username}: {line}")
                         self.send(protocol.format_error(protocol.ERR_INVALID_DM_FORMAT))
                 
                 elif line == protocol.CMD_PING:

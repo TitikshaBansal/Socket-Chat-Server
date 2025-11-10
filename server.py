@@ -194,13 +194,19 @@ class ChatServer:
         """Send a private message from one user to another."""
         # Find clients while holding lock, then release before sending
         with self.lock:
-            target_client = self.get_client_by_username(target_username)
-            sender_client = self.get_client_by_username(sender_username)
+            # Lookup directly to avoid nested lock acquisition
+            target_client_id = self.clients_by_username.get(target_username)
+            sender_client_id = self.clients_by_username.get(sender_username)
+            target_client = self.clients.get(target_client_id) if target_client_id else None
+            sender_client = self.clients.get(sender_client_id) if sender_client_id else None
+        
+        logger.debug(f"DM: sender={sender_username}, target={target_username}, target_found={target_client is not None}")
         
         if target_client:
             try:
                 message = protocol.format_private_message(sender_username, message_text)
                 target_client.socket.sendall((message + '\n').encode('utf-8'))
+                logger.debug(f"DM sent successfully from {sender_username} to {target_username}")
             except (BrokenPipeError, ConnectionError, OSError) as e:
                 # Only disconnect on actual socket errors, not all exceptions
                 logger.warning(f"Error sending DM to {target_username}: {e}")
@@ -211,14 +217,15 @@ class ChatServer:
                 logger.error(f"Unexpected error sending DM to {target_username}: {e}", exc_info=True)
         else:
             # User not found, notify sender
+            logger.warning(f"DM target user '{target_username}' not found")
             if sender_client:
                 try:
                     error_msg = protocol.format_error(
                         protocol.ERR_USER_NOT_FOUND, target_username
                     )
                     sender_client.socket.sendall((error_msg + '\n').encode('utf-8'))
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.error(f"Error sending user-not-found error to {sender_username}: {e}")
     
     def send_user_list(self, client: Client):
         """Send list of active users to a client."""
