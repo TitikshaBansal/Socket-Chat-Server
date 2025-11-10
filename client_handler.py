@@ -27,7 +27,7 @@ class ClientHandler:
     def send(self, message):
         """Send a message to the client using sendall() for reliability."""
         try:
-            message_bytes = (message + '\n').encode('utf-8')
+            message_bytes = (message + '\r\n').encode('utf-8')
             self.client.socket.sendall(message_bytes)
             return True
         except Exception as e:

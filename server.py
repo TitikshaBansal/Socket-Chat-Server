@@ -174,7 +174,7 @@ class ChatServer:
     
     def broadcast(self, message, exclude_client_id=None):
         """Broadcast a message to all connected users except the sender."""
-        message_bytes = (message + '\n').encode('utf-8')
+        message_bytes = (message + '\r\n').encode('utf-8')
         disconnected = []
         
         with self.lock:
@@ -205,7 +205,7 @@ class ChatServer:
         if target_client:
             try:
                 message = protocol.format_private_message(sender_username, message_text)
-                target_client.socket.sendall((message + '\n').encode('utf-8'))
+                target_client.socket.sendall((message + '\r\n').encode('utf-8'))
                 logger.debug(f"DM sent successfully from {sender_username} to {target_username}")
             except (BrokenPipeError, ConnectionError, OSError) as e:
                 # Only disconnect on actual socket errors, not all exceptions
@@ -223,7 +223,7 @@ class ChatServer:
                     error_msg = protocol.format_error(
                         protocol.ERR_USER_NOT_FOUND, target_username
                     )
-                    sender_client.socket.sendall((error_msg + '\n').encode('utf-8'))
+                    sender_client.socket.sendall((error_msg + '\r\n').encode('utf-8'))
                 except Exception as e:
                     logger.error(f"Error sending user-not-found error to {sender_username}: {e}")
     
@@ -235,7 +235,7 @@ class ChatServer:
         for username in usernames_list:
             try:
                 message = protocol.format_user_list(username)
-                client.socket.sendall((message + '\n').encode('utf-8'))
+                client.socket.sendall((message + '\r\n').encode('utf-8'))
             except Exception:
                 return
     
